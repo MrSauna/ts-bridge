@@ -27,7 +27,7 @@ def get_user_list(url: str, apikey: str) -> list[str]:
     r = requests.get(url+"/1/clientlist?-voice%20-away", headers={"X-API-Key": apikey})
     body = r.json()["body"]
     users = [user for user in body if user["client_type"] == '0']
-    away_nicknames = {user["client_nickname"] for user in users if user["client_away"] == '1' or user["client_output_muted"] == '1'}
+    away_nicknames = {user["client_nickname"] for user in users if user["client_away"] == '1' or user["client_output_muted"] == '1' or user["client_input_muted"] == '1'}
 
 
     all_nicknames = {user["client_nickname"] for user in users}

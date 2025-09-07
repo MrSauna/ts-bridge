@@ -1,2 +1,3 @@
 .env
 *.tar
+config/live_chat_id.txt

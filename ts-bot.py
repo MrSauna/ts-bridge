@@ -18,27 +18,21 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+
 def get_user_list(url: str, apikey: str) -> list[str]:
-    r = requests.get(url+"/1/clientlist", headers={"X-API-Key": apikey})
+
+    """Get the user list from the TeamSpeak server."""
+
+    r = requests.get(url+"/1/clientlist?-voice%20-away", headers={"X-API-Key": apikey})
     body = r.json()["body"]
-    users = [user["client_nickname"]  for user in body if user["client_type"] == '0']
-    users_sorted = sorted(users, key=str.lower)
-    return users_sorted
+    users = [user for user in body if user["client_type"] == '0']
+    away_nicknames = {user["client_nickname"] for user in users if user["client_away"] == '1' or user["client_output_muted"] == '1'}
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    all_nicknames = {user["client_nickname"] for user in users}
+    active_nicknames = all_nicknames - away_nicknames
 
-    """Send a message when the command /start is issued."""
-
-    user = update.effective_user
-
-    await update.message.reply_html(
-
-        rf"Hi {user.mention_html()}!",
-
-        reply_markup=ForceReply(selective=True),
-
-    )
+    return sorted(active_nicknames, key=str.lower), sorted(away_nicknames, key=str.lower)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -59,9 +53,21 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         rf"Your user ID is {user.id} and this group ID is {group.id}",
 
-        reply_markup=ForceReply(selective=True),
-
     )
+
+
+def format_user_list(active: list[str], away: list[str]) -> str:
+
+    """Format the user list from active and away users."""
+
+    temp = f"{len(active)}\\+_{len(away)}_: "
+    temp += ", ".join(active)
+
+    for user in away:
+        temp += f", _{user}_"
+    
+    return temp 
+
 
 async def ts_get_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
@@ -69,27 +75,30 @@ async def ts_get_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     ts_url = context.bot_data["ts_url"]
     ts_apikey = context.bot_data["ts_apikey"]
-    users = get_user_list(ts_url, ts_apikey)
-    await update.message.reply_text(f"Users: {', '.join(users)}")
+    active, away = get_user_list(ts_url, ts_apikey)
+
+    await update.message.reply_text(format_user_list(active, away), parse_mode="MarkdownV2")
 
 
 async def ts_get_users_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     """Get the user list from the TeamSpeak server. Live version."""
 
-    ts_url = context.bot_data["ts_url"]
-    ts_apikey = context.bot_data["ts_apikey"]
-    users = get_user_list(ts_url, ts_apikey)
+    # check fo existing live message
+    if "live_msg" in context.bot_data:
+        live_msg = context.bot_data["live_msg"]
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            reply_to_message_id=live_msg.message_id,
+            text="Live message already exists. Please wait for it to update."
+        )
+        return
+
+    # no existing live message, create one
     # Send the message and store the Message object for later editing
-    sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Users: {', '.join(users)}")
+    active, away = get_user_list(context.bot_data["ts_url"], context.bot_data["ts_apikey"])
+    sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text=format_user_list(active, away), parse_mode="MarkdownV2")
     context.bot_data["live_msg"] = sent_message  # Store the Message object
-
-
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-
-    """Echo the user message."""
-
-    await update.message.reply_text(update.message.text)
 
 
 async def check_perms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -105,13 +114,19 @@ async def check_perms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         raise ApplicationHandlerStop
 
 
-# Example: Editing the stored message
 async def update_live_message(context: ContextTypes.DEFAULT_TYPE):
+
+    """Update the live message with the current user list."""
+
     live_msg = context.bot_data.get("live_msg")
-    if live_msg:
-        users = get_user_list(context.bot_data["ts_url"], context.bot_data["ts_apikey"])
-        new_text = f"Users: {', '.join(users)}"
-        await live_msg.edit_text(new_text)
+    if not live_msg:
+        logger.warning("No live message to update.")
+        return
+
+    active, away = get_user_list(context.bot_data["ts_url"], context.bot_data["ts_apikey"])
+    text = format_user_list(active, away)
+    if text != live_msg.text_markdown_v2:
+        context.bot_data["live_msg"] = await live_msg.edit_text(format_user_list(active, away), parse_mode="MarkdownV2")
 
 
 def main() -> None:
@@ -133,12 +148,10 @@ def main() -> None:
     application.add_handler(check_perms_handler, -1)
 
     # normal handlers
-    application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("whoami", whoami_command))
     application.add_handler(CommandHandler("ts", ts_get_users))
     application.add_handler(CommandHandler("tslive", ts_get_users_live))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
     # Run the bot until the user presses Ctrl-C
     application.run_polling(allowed_updates=Update.ALL_TYPES)

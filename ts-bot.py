@@ -2,8 +2,9 @@ import logging
 import os
 import requests
 
-from telegram import ForceReply, Update
+from telegram import Update, Message
 from telegram.ext import Application, ApplicationHandlerStop, CommandHandler, ContextTypes, MessageHandler, TypeHandler, filters
+from telegram.helpers import escape_markdown
 
 
 # Enable logging
@@ -61,10 +62,12 @@ def format_user_list(active: list[str], away: list[str]) -> str:
     """Format the user list from active and away users."""
 
     temp = f"{len(active)}\\+_{len(away)}_: "
-    temp += ", ".join(active)
+    temp += ", ".join([escape_markdown(x) for x in active])
 
-    for user in away:
-        temp += f", _{user}_"
+    if len(away) > 0:
+        temp += " \\+ _" + escape_markdown(away[0]) + "_"
+    for user in away[1:]:
+        temp += f", _{escape_markdown(user)}_"
     
     return temp 
 
@@ -80,12 +83,42 @@ async def ts_get_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(format_user_list(active, away), parse_mode="MarkdownV2")
 
 
+async def get_live_message(context: ContextTypes.DEFAULT_TYPE) -> Message:
+
+    """Get the live message from the bot data or file."""
+
+    if context.bot_data.get("live_msg") is None:
+        logger.info("No live message to update. Trying to load message ID from file.")
+        try:
+            with open("config/live_chat_id.txt", "r") as f:
+                chat_id, message_id  = [int(x) for x in f.read().strip().split(",")]
+                live_msg = await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text="Initializing..."
+                )
+                logger.info("Live message created from chat ID in file.")
+                context.bot_data["live_msg"] = live_msg
+
+        except Exception as e:
+            logger.error(f"Failed to read chat ID from file: {e}")
+    
+    if context.bot_data.get("live_msg") is not None:
+        return context.bot_data["live_msg"]
+    
+    logger.info("No live message found.")
+    return None
+
+
 async def ts_get_users_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     """Get the user list from the TeamSpeak server. Live version."""
 
     # check fo existing live message
-    if "live_msg" in context.bot_data:
+    live_msg = await get_live_message(context)
+
+    # there is an existing live message, inform the user and return
+    if live_msg is not None:
         live_msg = context.bot_data["live_msg"]
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -95,10 +128,28 @@ async def ts_get_users_live(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     # no existing live message, create one
-    # Send the message and store the Message object for later editing
+    # Send the message and store the Message in bot_data and file
     active, away = get_user_list(context.bot_data["ts_url"], context.bot_data["ts_apikey"])
     sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text=format_user_list(active, away), parse_mode="MarkdownV2")
     context.bot_data["live_msg"] = sent_message  # Store the Message object
+
+    # save the chat id persistently
+    os.makedirs("config", exist_ok=True)
+    with open("config/live_chat_id.txt", "w") as f:
+        f.write(f"{update.effective_chat.id},{sent_message.message_id}")
+
+
+async def update_live_message(context: ContextTypes.DEFAULT_TYPE):
+
+    """Update the live message with the current user list."""
+
+    live_msg = await get_live_message(context)
+    if live_msg is not None:
+        active, away = get_user_list(context.bot_data["ts_url"], context.bot_data["ts_apikey"])
+        text = format_user_list(active, away)
+        if text != live_msg.text_markdown_v2:
+            context.bot_data["live_msg"] = await live_msg.edit_text(text, parse_mode="MarkdownV2")
+        return
 
 
 async def check_perms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -112,21 +163,6 @@ async def check_perms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         logger.error(f"Unauthorized access to group {group.id} ({group.title})")
         raise ApplicationHandlerStop
-
-
-async def update_live_message(context: ContextTypes.DEFAULT_TYPE):
-
-    """Update the live message with the current user list."""
-
-    live_msg = context.bot_data.get("live_msg")
-    if not live_msg:
-        logger.warning("No live message to update.")
-        return
-
-    active, away = get_user_list(context.bot_data["ts_url"], context.bot_data["ts_apikey"])
-    text = format_user_list(active, away)
-    if text != live_msg.text_markdown_v2:
-        context.bot_data["live_msg"] = await live_msg.edit_text(format_user_list(active, away), parse_mode="MarkdownV2")
 
 
 def main() -> None:
